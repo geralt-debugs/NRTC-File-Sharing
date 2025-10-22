@@ -9,6 +9,7 @@ import {
   EventTemplate,
   UnsignedEvent,
 } from "nostr-tools";
+import { v4 as uuidv4 } from "uuid";
 
 export const RELAY_URL = "wss://relay.primal.net";
 export const kindOffer = 5010;
@@ -72,11 +73,9 @@ async function handleFileListEvent(event: Event) {
   const advertisedFilesContainer = document.getElementById("advertisedFiles");
   if (!advertisedFilesContainer) return;
 
-  advertisedFilesContainer.innerHTML = ""; // Clear previous
-
   files.forEach((file) => {
     const fileElem = document.createElement("div");
-    fileElem.textContent = file.name;
+    fileElem.textContent = `${file.name} by ${event.pubkey}`;
     fileElem.style.cursor = "pointer";
     fileElem.style.padding = "5px";
     fileElem.style.border = "1px solid #ccc";
@@ -185,24 +184,26 @@ function setupDataChannel() {
 }
 
 // Handle messages received over DataChannel
-function handleDataChannelMessage(message: string) {
-  try {
-    const msgObj = JSON.parse(message);
-    if (msgObj.type === "file_request") {
-      // 2nd user requests a file
-      log(`📥 File request received for: ${msgObj.filename}`);
-      // Here we could trigger UI to approve or deny the request
-      // For now, auto-approve and send file
-      sendFile(msgObj.filename);
-    } else if (msgObj.type === "file_chunk") {
-      // Receiving file chunk
-      receiveFileChunk(msgObj);
-    } else if (msgObj.type === "file_end") {
-      // File transfer complete
-      finalizeReceivedFile();
+function handleDataChannelMessage(message: any) {
+  if (typeof message === "string") {
+    try {
+      const msgObj = JSON.parse(message);
+      if (msgObj.type === "file_request") {
+        log(`📥 File request received for: ${msgObj.filename}`);
+        sendFile(msgObj.filename);
+      } else if (msgObj.type === "file_end") {
+        finalizeReceivedFile();
+      }
+    } catch {
+      log("⚠️ Invalid JSON message received: " + message);
     }
-  } catch (e) {
-    log("⚠️ Invalid message received: " + message);
+  } else if (message instanceof ArrayBuffer) {
+    if (!receivingFile) {
+      receivingFile = true;
+      receivedBuffers = [];
+    }
+    receivedBuffers.push(message);
+    log(`📥 Received chunk (${receivedBuffers.length})`);
   }
 }
 
@@ -212,20 +213,16 @@ let currentFile: File | null = null;
 let chunkSize = 16 * 1024; // 16 KB
 let offset = 0;
 
-// Send file in chunks over DataChannel
 function sendFile(filename: string) {
   if (!dataChannel || dataChannel.readyState !== "open") {
     log("⚠️ Data channel not open for sending file");
     return;
   }
-  // Find the file in advertisedFiles
   const fileEntry = advertisedFiles.find((f) => f.name === filename);
   if (!fileEntry) {
     log(`⚠️ File not found: ${filename}`);
     return;
   }
-  // For demo, assume we have access to the actual File object in fileEntry.metadata as JSON string with a 'file' property
-  // In real app, you would manage actual File objects separately
   if (!fileEntry.metadata) {
     log(`⚠️ No file data available for: ${filename}`);
     return;
@@ -240,13 +237,13 @@ function sendFile(filename: string) {
   fileReader = new FileReader();
   fileReader.onload = (e) => {
     if (!e.target?.result) return;
-    dataChannel!.send(
-      JSON.stringify({ type: "file_chunk", data: e.target.result })
-    );
+    // Send raw ArrayBuffer data directly over DataChannel without JSON.stringify
+    dataChannel!.send(e.target.result as ArrayBuffer);
     offset += chunkSize;
     if (offset < currentFile!.size) {
       readSlice(offset);
     } else {
+      // Send a simple JSON message to indicate file end
       dataChannel!.send(JSON.stringify({ type: "file_end" }));
       log(`📤 File sent: ${filename}`);
       currentFile = null;
@@ -262,22 +259,41 @@ function readSlice(o: number) {
 }
 
 // Receiving file state
+let receivingFile = false;
 let receivedBuffers: ArrayBuffer[] = [];
 
-function receiveFileChunk(msgObj: any) {
-  receivedBuffers.push(msgObj.data);
-  log(`📥 Received chunk (${receivedBuffers.length})`);
-}
+// function handleDataChannelMessage(message: any) {
+//   if (typeof message === "string") {
+//     try {
+//       const msgObj = JSON.parse(message);
+//       if (msgObj.type === "file_request") {
+//         log(`📥 File request received for: ${msgObj.filename}`);
+//         sendFile(msgObj.filename);
+//       } else if (msgObj.type === "file_end") {
+//         finalizeReceivedFile();
+//       }
+//     } catch {
+//       log("⚠️ Invalid JSON message received: " + message);
+//     }
+//   } else if (message instanceof ArrayBuffer) {
+//     if (!receivingFile) {
+//       receivingFile = true;
+//       receivedBuffers = [];
+//     }
+//     receivedBuffers.push(message);
+//     log(`📥 Received chunk (${receivedBuffers.length})`);
+//   }
+// }
 
 function finalizeReceivedFile() {
   const blob = new Blob(receivedBuffers);
   receivedBuffers = [];
+  receivingFile = false;
   const url = URL.createObjectURL(blob);
   log(`✅ File received. Download link: ${url}`);
-  // Optionally, create a download link in UI
   const a = document.createElement("a");
   a.href = url;
-  a.download = receivedFileName || "downloaded_file";
+  a.download = receivedFileName || "downloaded_file"; // Could be improved to preserve original filename
   a.textContent = "Download received file";
   document.body.appendChild(a);
 }
@@ -311,7 +327,7 @@ async function publishSignaling(
 
 // Start a session as initiator
 export async function startSession(targetPubkey: string) {
-  const sessionId = crypto.randomUUID();
+  const sessionId = uuidv4();
   createPeer(true, targetPubkey, sessionId);
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
