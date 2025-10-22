@@ -29,6 +29,7 @@ folderInput?.addEventListener("change", (event: Event) => {
   advertiseFiles(
     fileArray.map((file) => ({
       name: file.name,
+      file,
       metadata: JSON.stringify({ size: file.size, mime: file.type, file }),
     }))
   );

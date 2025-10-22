@@ -27,10 +27,14 @@ const log = (m: string) => {
   el.scrollTop = el.scrollHeight;
 };
 
-// File list management
-let advertisedFiles: { name: string; metadata?: string }[] = [];
+let receivedFileName: string | null = null;
 
-export function advertiseFiles(files: { name: string; metadata?: string }[]) {
+// File list management
+let advertisedFiles: { name: string; metadata?: string; file: File }[] = [];
+
+export function advertiseFiles(
+  files: { name: string; metadata?: string; file: File }[]
+) {
   advertisedFiles = files;
   publishFileList();
 }
@@ -96,6 +100,7 @@ function requestFile(peerPubkey: string, filename: string) {
   const requestMsg = JSON.stringify({ type: "file_request", filename });
   dataChannel.send(requestMsg);
   log(`📨 Requested file: ${filename} from ${peerPubkey}`);
+  receivedFileName = filename;
 }
 
 async function subscribeRelay() {
@@ -225,7 +230,7 @@ function sendFile(filename: string) {
     log(`⚠️ No file data available for: ${filename}`);
     return;
   }
-  const fileData = JSON.parse(fileEntry.metadata).file as File;
+  const fileData = fileEntry.file;
   if (!fileData) {
     log(`⚠️ No file object found in metadata for: ${filename}`);
     return;
@@ -258,7 +263,6 @@ function readSlice(o: number) {
 
 // Receiving file state
 let receivedBuffers: ArrayBuffer[] = [];
-let receivedFileName: string | null = null;
 
 function receiveFileChunk(msgObj: any) {
   receivedBuffers.push(msgObj.data);
