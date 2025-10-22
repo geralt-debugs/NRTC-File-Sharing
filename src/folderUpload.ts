@@ -1,3 +1,5 @@
+import { advertiseFiles } from "./client";
+
 const folderInput = document.getElementById("folderUpload") as HTMLInputElement;
 const fileList = document.getElementById("fileList") as HTMLUListElement;
 
@@ -22,4 +24,12 @@ folderInput?.addEventListener("change", (event: Event) => {
     li.textContent = file.webkitRelativePath;
     fileList.appendChild(li);
   }
+
+  // Advertise files to the network
+  advertiseFiles(
+    fileArray.map((file) => ({
+      name: file.name,
+      metadata: JSON.stringify({ size: file.size, mime: file.type, file }),
+    }))
+  );
 });

@@ -27,6 +27,89 @@ const log = (m: string) => {
   el.scrollTop = el.scrollHeight;
 };
 
+// File list management
+let advertisedFiles: { name: string; metadata?: string }[] = [];
+
+export function advertiseFiles(files: { name: string; metadata?: string }[]) {
+  advertisedFiles = files;
+  publishFileList();
+}
+
+async function publishFileList() {
+  const tags = advertisedFiles.map((file) => [
+    "file",
+    file.name,
+    file.metadata || "",
+  ]);
+  const event: UnsignedEvent = {
+    kind: 10020,
+    pubkey: pk,
+    created_at: Math.floor(Date.now() / 1000),
+    tags,
+    content: "",
+  };
+  const signedEvent = finalizeEvent(event, sk);
+  await relay.publish(signedEvent);
+}
+
+async function handleFileListEvent(event: Event) {
+  if (event.kind !== 10020) return;
+  // Update UI or internal state with advertised files
+  const files = event.tags
+    .filter((tag) => tag[0] === "file")
+    .map((tag) => ({ name: tag[1], metadata: tag[2] }));
+  log(
+    `📁 Files advertised by ${event.pubkey}: ${files
+      .map((f) => f.name)
+      .join(", ")}`
+  );
+
+  // Update UI component to show files as clickable list for requesting
+  const advertisedFilesContainer = document.getElementById("advertisedFiles");
+  if (!advertisedFilesContainer) return;
+
+  advertisedFilesContainer.innerHTML = ""; // Clear previous
+
+  files.forEach((file) => {
+    const fileElem = document.createElement("div");
+    fileElem.textContent = file.name;
+    fileElem.style.cursor = "pointer";
+    fileElem.style.padding = "5px";
+    fileElem.style.border = "1px solid #ccc";
+    fileElem.style.margin = "2px 0";
+    fileElem.title = "Click to request this file";
+
+    fileElem.onclick = () => {
+      requestFile(event.pubkey, file.name);
+    };
+
+    advertisedFilesContainer.appendChild(fileElem);
+  });
+}
+
+// Request a file from a peer
+function requestFile(peerPubkey: string, filename: string) {
+  if (!dataChannel || dataChannel.readyState !== "open") {
+    log("⚠️ Data channel not open for file request");
+    return;
+  }
+  const requestMsg = JSON.stringify({ type: "file_request", filename });
+  dataChannel.send(requestMsg);
+  log(`📨 Requested file: ${filename} from ${peerPubkey}`);
+}
+
+async function subscribeRelay() {
+  const sub = relay.subscribe(
+    [{ kinds: [kindOffer, kindAnswer, kindIce, 10020] }],
+    {
+      onevent: (event) => {
+        handleEvent(event);
+        handleFileListEvent(event);
+      },
+    }
+  );
+}
+
 // Initialize Relay
 export async function initRelay() {
   try {
@@ -36,13 +119,6 @@ export async function initRelay() {
   } catch (err) {
     log("⚠️ Failed to connect: " + err);
   }
-}
-
-// Subscribe to signaling events
-async function subscribeRelay() {
-  const sub = relay.subscribe([{ kinds: [kindOffer, kindAnswer, kindIce] }], {
-    onevent: handleEvent,
-  });
 }
 
 // Key generation
@@ -97,7 +173,109 @@ function createPeer(
 function setupDataChannel() {
   if (!dataChannel) return;
   dataChannel.onopen = () => log("📡 Data channel open");
-  dataChannel.onmessage = (e) => log("Peer: " + e.data);
+  dataChannel.onmessage = (e) => {
+    log("Peer: " + e.data);
+    handleDataChannelMessage(e.data);
+  };
+}
+
+// Handle messages received over DataChannel
+function handleDataChannelMessage(message: string) {
+  try {
+    const msgObj = JSON.parse(message);
+    if (msgObj.type === "file_request") {
+      // 2nd user requests a file
+      log(`📥 File request received for: ${msgObj.filename}`);
+      // Here we could trigger UI to approve or deny the request
+      // For now, auto-approve and send file
+      sendFile(msgObj.filename);
+    } else if (msgObj.type === "file_chunk") {
+      // Receiving file chunk
+      receiveFileChunk(msgObj);
+    } else if (msgObj.type === "file_end") {
+      // File transfer complete
+      finalizeReceivedFile();
+    }
+  } catch (e) {
+    log("⚠️ Invalid message received: " + message);
+  }
+}
+
+// File sending state
+let fileReader: FileReader | null = null;
+let currentFile: File | null = null;
+let chunkSize = 16 * 1024; // 16 KB
+let offset = 0;
+
+// Send file in chunks over DataChannel
+function sendFile(filename: string) {
+  if (!dataChannel || dataChannel.readyState !== "open") {
+    log("⚠️ Data channel not open for sending file");
+    return;
+  }
+  // Find the file in advertisedFiles
+  const fileEntry = advertisedFiles.find((f) => f.name === filename);
+  if (!fileEntry) {
+    log(`⚠️ File not found: ${filename}`);
+    return;
+  }
+  // For demo, assume we have access to the actual File object in fileEntry.metadata as JSON string with a 'file' property
+  // In real app, you would manage actual File objects separately
+  if (!fileEntry.metadata) {
+    log(`⚠️ No file data available for: ${filename}`);
+    return;
+  }
+  const fileData = JSON.parse(fileEntry.metadata).file as File;
+  if (!fileData) {
+    log(`⚠️ No file object found in metadata for: ${filename}`);
+    return;
+  }
+  currentFile = fileData;
+  offset = 0;
+  fileReader = new FileReader();
+  fileReader.onload = (e) => {
+    if (!e.target?.result) return;
+    dataChannel!.send(
+      JSON.stringify({ type: "file_chunk", data: e.target.result })
+    );
+    offset += chunkSize;
+    if (offset < currentFile!.size) {
+      readSlice(offset);
+    } else {
+      dataChannel!.send(JSON.stringify({ type: "file_end" }));
+      log(`📤 File sent: ${filename}`);
+      currentFile = null;
+      fileReader = null;
+    }
+  };
+  readSlice(0);
+}
+
+function readSlice(o: number) {
+  const slice = currentFile!.slice(o, o + chunkSize);
+  fileReader!.readAsArrayBuffer(slice);
+}
+
+// Receiving file state
+let receivedBuffers: ArrayBuffer[] = [];
+let receivedFileName: string | null = null;
+
+function receiveFileChunk(msgObj: any) {
+  receivedBuffers.push(msgObj.data);
+  log(`📥 Received chunk (${receivedBuffers.length})`);
+}
+
+function finalizeReceivedFile() {
+  const blob = new Blob(receivedBuffers);
+  receivedBuffers = [];
+  const url = URL.createObjectURL(blob);
+  log(`✅ File received. Download link: ${url}`);
+  // Optionally, create a download link in UI
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = receivedFileName || "downloaded_file";
+  a.textContent = "Download received file";
+  document.body.appendChild(a);
 }
 
 // Publish signaling events
