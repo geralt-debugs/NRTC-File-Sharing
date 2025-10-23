@@ -10,6 +10,7 @@ import {
   UnsignedEvent,
 } from "nostr-tools";
 import { v4 as uuidv4 } from "uuid";
+import iceServers from "./servers.json";
 
 export const RELAY_URL = "wss://relay.primal.net";
 export const kindOffer = 5010;
@@ -141,15 +142,7 @@ function createPeer(
   sessionId: string
 ): RTCPeerConnection {
   pc = new RTCPeerConnection({
-    iceServers: [
-      { urls: "stun:stun.l.google.com:19302" },
-      { urls: "stun:stun1.l.google.com:19302" },
-      {
-        urls: "turn:numb.viagenie.ca",
-        username: "webrtc@live.com",
-        credential: "muazkh",
-      },
-    ],
+    iceServers,
   });
 
   if (initiator) {
